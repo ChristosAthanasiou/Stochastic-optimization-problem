@@ -35,11 +35,14 @@ df_orders = pd.read_excel(input_file, sheet_name="Orders")
 orders_type_a = df_orders[df_orders["type"] == "A"]["order_id"].tolist()
 orders_type_b = df_orders[df_orders["type"] == "B"]["order_id"].tolist()
 orders = sorted(df_orders["order_id"].tolist())     # all orders in ascending order
-orders_profit = dict(zip(df_orders["order_id"], df_orders["profit (€)"]))   # orders profit
-duration = df_orders.set_index("order_id")["duration (h)"].to_dict()
-duration = [duration[i] for i in orders]        # duration of execution of orders (in hours)
-consumption = df_orders.set_index("order_id")["consumption (MW/h)"].to_dict()
-consumption = [consumption[i] for i in orders]      # energy consumption of each order per hour (MW)
+
+orders_revenue = dict(zip(df_orders["order_id"], df_orders["profit (€)"]))   # orders profit
+
+duration_dict = df_orders.set_index("order_id")["duration (h)"].to_dict()
+duration = [duration_dict[i] for i in orders]        # duration of execution of orders (in hours)
+
+consumption_dict = df_orders.set_index("order_id")["consumption (MW/h)"].to_dict()
+consumption = [consumption_dict[i] for i in orders]      # energy consumption of each order per hour (MW)
 
 # factories setup from sheet
 df_factories = pd.read_excel(input_file, sheet_name="Factories")
@@ -60,9 +63,11 @@ scenario_prices = {
 }
 
 # other constants
-M = 1000    # M variable for the Big M Method
 hours = list(range(0, 24))
-fixed_energy_price = 5    # fixed energy price (€)
+# M variable for the Big M Method
+M = 1000
+# fixed energy price (€ per MWh) for the energy bought in Stage 1
+fixed_energy_price = 5
 
 
 # ----------------------------------------------------------------------------
@@ -211,12 +216,12 @@ for w in scenarios:
                 twostageprob += (
                     s_i[w, i] + duration[i] - s_i[w, k]
                     <= (M * (1 - q_jik[(w, j, i, k)])) + (M * (1 - p_jik[(w, j, i, k)])),
-                    f"Big_M_constraint_5_for_order_{j}_{i}_{k}_scen{w}",
+                    f"Big_M_constraint_3_for_order_{j}_{i}_{k}_scen{w}",
                 )
                 twostageprob += (
                     s_i[w, k] + duration[k] - s_i[w, i]
                     <= (M * q_jik[(w, j, i, k)]) + (M * (1 - p_jik[(w, j, i, k)])),
-                    f"Big_M_constraint_6_for_order_{j}_{i}_{k}_scen{w}",
+                    f"Big_M_constraint_4_for_order_{j}_{i}_{k}_scen{w}",
                 )
 
     # consumption control for each scenario
@@ -242,7 +247,7 @@ for w in scenarios:
 
     # total revenue calculation of each scenario
     scenario_revenue = pulp.lpSum(
-        [x_ji[(w, j, i)] * orders_profit[i] for j, i in feasible_factories_orders]
+        [x_ji[(w, j, i)] * orders_revenue[i] for j, i in feasible_factories_orders]
     )
 
     # expected total profit of orders placed in factories for all scenarios
@@ -283,9 +288,9 @@ for w in scenarios:
         if pulp.value(x_ji[(w, j, i)]) > 0.5:
             start = int(pulp.value(s_i[(w, i)]))
             spot = Eji[(w, j, i)][start]            
-            print(f"- Order {i} at Factory {j}: Start at {int(start)}:00 | Dur: {duration[i]}h | Cons/h: {consumption[i]} MW | Total Cons: {consumption[i] * duration[i]} MWh | Revenue: {orders_profit[i]} € | Spot Cost: {spot:.1f}€ | Profit: {orders_profit[i] - spot:.1f}€")
+            print(f"- Order {i} at Factory {j}: Start at {int(start)}:00 | Dur: {duration[i]}h | Cons/h: {consumption[i]} MW | Total Cons: {consumption[i] * duration[i]} MWh | Revenue: {orders_revenue[i]} € | Spot Cost: {spot:.1f}€ | Profit: {orders_revenue[i] - spot:.1f}€")
             cons += consumption[i] * duration[i]
-            scenario_revenue += orders_profit[i]
+            scenario_revenue += orders_revenue[i]
             scenario_spot_cost += spot
 
     scenario_spot_profit = scenario_revenue - scenario_spot_cost
@@ -408,7 +413,7 @@ for w in scenarios:
         txt2.set_path_effects([path_effects.withStroke(linewidth=2.5, foreground='black')])
 
     # graph formatting
-    plt.ylabel("Energy Cost (€/MWhr)", fontsize=12, fontweight="bold")
+    plt.ylabel("Energy Cost (€ per MWh)", fontsize=12, fontweight="bold")
     plt.title(f"Energy Cost of each factory - Scenario {w} (p={pscenarios[w]}) - Colored by Type of Orders", fontsize=14, fontweight='bold')
     plt.grid(axis="y", linestyle="--", alpha=0.5)
     plt.legend(handles=[red_patch, blue_patch], shadow=True,
@@ -506,9 +511,15 @@ for w in scenarios:
                 else:
                     hourly_cost_type_c[h] += cost_at_h
 
-    # calculation of mean value
+    # calculation of two mean values
     total_hourly_cost = hourly_cost_type_a + hourly_cost_type_b + hourly_cost_type_c
-    average_cost = np.mean(total_hourly_cost)
+
+    # average over all 24 hours
+    average_cost_24h = np.mean(total_hourly_cost)
+
+    # average over active hours only
+    active_hours = total_hourly_cost[total_hourly_cost > 0]
+    average_cost_active = np.mean(active_hours) if len(active_hours) > 0 else 0
 
     # figure creation with specific dimensions
     plt.figure(figsize=(14, 7))
@@ -524,19 +535,28 @@ for w in scenarios:
         range(24), hourly_cost_type_c, color="green", linewidth=2.5, label="Type C Factories"
     )
 
-    # drawing the dotted line of the average hourly cost
+    # drawing the dotted line of the average over all 24 hours
     plt.axhline(
-        y=average_cost,
+        y=average_cost_24h,
         color="black",
         linestyle="--",
         linewidth=1.5,
-        label=f"Average Hourly Cost ({average_cost:.1f} €/MWh)",
+        label=f"Average Cost - All Hours ({average_cost_24h:.1f} € per MWh)",
     )
+
+    # drawing the dotted line of the average over all 24 hours
+    plt.axhline(
+        y=average_cost_active,
+        color="gray",
+        linestyle="-.",
+        linewidth=1.5,
+        label=f"Average Cost - Active Hours ({average_cost_active:.1f} € per MWh)",
+)
 
     # graph formatting
     plt.title(f"Hourly Energy Cost Profile per Factory Type - Scenario {w} (p={pscenarios[w]})", fontsize=16, fontweight='bold')
     plt.xlabel("Hours of the day", fontsize=12, fontweight="bold")
-    plt.ylabel("Energy Cost (€/MWh)", fontsize=12, fontweight="bold")
+    plt.ylabel("Energy Cost (€ per MWh)", fontsize=12, fontweight="bold")
     # axis setting
     plt.xlim(0, 23)
     plt.xticks(range(0, 24))
@@ -565,13 +585,13 @@ for w in scenarios:
         color='orange', 
         linewidth=4, 
         alpha=0.8,
-        label='Energy Price (€/MWh)',
+        label='Energy Price (€ per MWh)',
         zorder=2,    # behind the letters but in front of the grid
         drawstyle='steps-post'
     )
 
     # adjustments for axis Y2
-    ax2.set_ylabel("Energy Price (€/MWh)", fontsize=12, color='darkorange', fontweight='bold')
+    ax2.set_ylabel("Energy Price (€ per MWh)", fontsize=12, color='darkorange', fontweight='bold')
     ax2.tick_params(axis='y', labelcolor='darkorange')
     ax2.set_ylim(0, max(current_prices) + 50)
 
